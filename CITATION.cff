@@ -1,0 +1,28 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite it as follows."
+type: software
+title: "Distribution-aware microstates and global field power analysis for EEG abnormality characterization"
+version: "1.0.0"
+date-released: "2026-04-10"
+license: "MIT"
+repository-code: "https://github.com/leonardocorsi/distribution-aware-microstates"
+authors:
+  - family-names: "Corsi"
+    given-names: "Leonardo"
+    affiliation: "IRCCS Fondazione Don Carlo Gnocchi ETS"
+    email: "leonardo.corsi.app@gmail.com"
+preferred-citation:
+  type: article
+  title: "Distribution-aware microstates and global field power analysis for EEG abnormality characterization"
+  year: 2026
+  authors:
+    - family-names: "Corsi"
+      given-names: "Leonardo"
+    - family-names: "Liuzzi"
+      given-names: "Piergiuseppe"
+    - family-names: "Ballanti"
+      given-names: "Sara"
+    - family-names: "Oddo"
+      given-names: "Calogero Maria"
+    - family-names: "Mannini"
+      given-names: "Andrea"

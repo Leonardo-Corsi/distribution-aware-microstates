@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gfp-silences"
+version = "0.1.0"
+description = "TUH-focused GFP silences pipeline workspace"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "pandas>=2.2,<3.0",
+  "tqdm>=4.66,<5.0",
+  "termcolor>=2.4,<3.0",
+  "pyprep==0.4.3",
+  "mne-icalabel==0.7.0",
+  "python-picard==0.8",
+  "joblib>=1.4,<2.0",
+  "torch==2.11.0",
+  "torchvision==0.26.0",
+  "pyarrow==23.0.1",
+  "lempel-ziv-complexity==0.2.2",
+  "pycrostates==0.6.1",
+  "seaborn==0.13.2",
+  "dcurves==1.1.7",
+  "optuna==4.3.0",
+  "scikit-learn==1.8.0"
+]
+
+[tool.setuptools]
+py-modules = [
+  "_config_loader",
+  "_header_parsing",
+  "s0_loading",
+  "s0_loading_utils",
+  "s1_preprocess_utils",
+  "_microstates_utils",
+]

@@ -1,0 +1,125 @@
+{
+  "tuh_parent": "H:/Data/TUH/",
+  "output_parent": "D:/TUH/outputs/",
+  "n_jobs": 25,
+  "s0": {
+    "s0_parent": "s0",
+    "reparse_headers": true,
+    "parsed_header_path": "parsed_header.pkl",
+    "parsed_header_tuab_path": "parsed_header_TUAB.pkl",
+    "manifest_path": "s0_manifest.json"
+  },
+  "s1": {
+    "s1_parent": "s1/wprep-wbadid",
+    "results_path": "preprocess_results.pkl",
+    "summary_path": "preprocess_summary.json",
+    "persist_results": true,
+    "apply_ica": true,
+    "referencing_strategy": "pyprep",
+    "l_freq": 1,
+    "h_freq": 45,
+    "l_trans_bandwidth": 1,
+    "h_trans_bandwidth": 5,
+    "notch_freq": 60,
+    "no_signal_threshold": 1e-6,
+    "no_signal_threshold_s": 0.5,
+    "seg_env_l_freq": 1,
+    "seg_th_env": 1e-4,
+    "seg_t_falsenegative": 2,
+    "seg_t_falsepositive": 1,
+    "seg_skirts": 0.5,
+    "seg_reject_if_shorter_than": 2.5,
+    "enable_bad_interval_detection": true,
+    "enable_bad_channel_interpolation": true,
+    "channels": [
+      "Fp1",
+      "Fp2",
+      "Fz",
+      "Cz",
+      "Pz",
+      "F7",
+      "F3",
+      "F4",
+      "F8",
+      "C3",
+      "C4",
+      "T4",
+      "T5",
+      "P3",
+      "P4",
+      "T6",
+      "O1",
+      "O2",
+      "T3"
+    ],
+    "montage": "standard_1020",
+    "prep_params": {
+      "ref_chs": "eeg",
+      "reref_chs": "eeg",
+      "line_freqs": [],
+      "max_iterations": 10
+    },
+    "bad_gfp_band": [
+      30,
+      45
+    ],
+    "seed": 1,
+    "ica_params": {
+      "n_components": 0.99,
+      "method": "picard",
+      "fit_params": {
+        "extended": 1,
+        "ortho": false
+      }
+    }
+  },
+  "s2": {
+    "s2_parent": "s2/wprep-wbadid",
+    "gabstract": {
+      "input_stage": "ica",
+      "output_subdir": "gabstract",
+      "seed": 42
+    },
+    "extraction": {
+      "output_subdir_without_ica": "features_without_ica",
+      "output_subdir_with_ica": "features_with_ica",
+      "recompute": true,
+      "show_plots": false,
+      "psd": {
+        "fmin": 0.5,
+        "fmax": 32.0,
+        "n_fft_sec": 2.0,
+        "n_overlap_sec": 1.0
+      },
+      "microstates": {
+        "n_ms": 4,
+        "metamaps_json": "assets/microstates/metamaps_export.json",
+        "gfp_h_freq": 32.0,
+        "min_peak_distance_ms": 30.0,
+        "pycrostates_params": {
+          "reject_by_annotation": true,
+          "factor": 5,
+          "half_window_size": 2,
+          "min_segment_length": 3,
+          "reject_edges": true
+        }
+      }
+    }
+  },
+  "s3": {
+    "s3_parent": "s3/wprep-wbadid",
+    "output_subdir": "with_ica",
+    "output_subdir_with_ica": "with_ica",
+    "output_subdir_without_ica": "without_ica",
+    "studies_subdir": "studies",
+    "intermediate_features_subdir": "intermediate-features",
+    "paperitems_subdir": "paperitems",
+    "tables_subdir": "tables",
+    "input_stage": "with_ica",
+    "recompute_intermediate_dfs": false,
+    "force_recompute_studies": false,
+    "optuna_n_trials": 500,
+    "optuna_n_jobs": 60
+  }
+  
+}
