@@ -14,6 +14,7 @@ from _config_loader import load_configs
 plt.rcParams.update(
     {
         "font.family": "Times New Roman",
+        "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
         "font.size": 10,
     }
 )
@@ -23,7 +24,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Create S2 graphical abstract from one preprocessed EEG window.")
     parser.add_argument("--config", default="configs.json", help="Path to configs.json")
     parser.add_argument("--subject-id", type=str, default=None, help="Optional subject/id substring filter.")
-    parser.add_argument("--seed", type=int, default=None, help="Deterministic seed override (default from config).")
+    parser.add_argument("--seed", type=int, default=42, help="Deterministic seed override (default from config).")
     return parser.parse_args()
 
 
@@ -124,6 +125,11 @@ def _load_gabstract_runtime(cfg, seed_override=None):
         "window_sec": 1.0,
         "flank_sec": 4.0,
         "start_max_sec": 300.0,
+        "min_gfp_minima": 4,
+        "max_gfp_minima": 8,
+        "max_microstate_intervals": 12,
+        "min_mtmi_ms": 80.0,
+        "min_label_ms": 10,
         "topomap_size": 0.35,
         "link_lines": True,
         "n_ms": 4,
@@ -155,6 +161,13 @@ def _load_gabstract_runtime(cfg, seed_override=None):
         "window_sec": float(gab_cfg.get("window_sec", defaults["window_sec"])),
         "flank_sec": float(gab_cfg.get("flank_sec", defaults["flank_sec"])),
         "start_max_sec": float(gab_cfg.get("start_max_sec", defaults["start_max_sec"])),
+        "min_gfp_minima": int(gab_cfg.get("min_gfp_minima", defaults["min_gfp_minima"])),
+        "max_gfp_minima": int(gab_cfg.get("max_gfp_minima", defaults["max_gfp_minima"])),
+        "max_microstate_intervals": int(
+            gab_cfg.get("max_microstate_intervals", defaults["max_microstate_intervals"])
+        ),
+        "min_mtmi_ms": float(gab_cfg.get("min_mtmi_ms", defaults["min_mtmi_ms"])),
+        "min_label_ms": float(gab_cfg.get("min_label_ms", defaults["min_label_ms"])),
         "topomap_size": float(gab_cfg.get("topomap_size", defaults["topomap_size"])),
         "link_lines": bool(gab_cfg.get("link_lines", defaults["link_lines"])),
         "n_ms": int(gab_cfg.get("n_ms", defaults["n_ms"])),
@@ -396,6 +409,43 @@ def create_graphical_abstract(
     cleanup=False,
     show=False,
 ):
+    def _nice_scale_length(value):
+        v = float(abs(value))
+        if v <= 0 or not np.isfinite(v):
+            return 1.0
+        exp = np.floor(np.log10(v))
+        base = v / (10 ** exp)
+        if base < 1.5:
+            nice = 1.0
+        elif base < 3.5:
+            nice = 2.0
+        elif base < 7.5:
+            nice = 5.0
+        else:
+            nice = 10.0
+        return nice * (10 ** exp)
+
+    def _add_y_scale_bar(ax, bar_len, unit, y_frac=0.62):
+        y0, y1 = ax.get_ylim()
+        x0, x1 = ax.get_xlim()
+        yr = y1 - y0
+        xr = x1 - x0
+        if yr == 0 or xr == 0:
+            return
+        x = x0 + 0.02 * xr
+        y = y0 + float(y_frac) * yr
+        ax.plot([x, x], [y, y + bar_len], color="k", linewidth=2.0, solid_capstyle="butt", zorder=20)
+        ax.text(
+            x + 0.012 * xr,
+            y + 0.5 * bar_len,
+            f"{bar_len:g} {unit}",
+            va="center",
+            ha="left",
+            fontsize=8,
+            color="k",
+            zorder=21,
+        )
+
     def _zscore_map(vec):
         v = np.asarray(vec, dtype=float).copy()
         v -= np.mean(v)
@@ -404,26 +454,46 @@ def create_graphical_abstract(
             s = 1.0
         return v / s
 
-    def _add_topomap_outline(ax, edge_color, lw=3.0):
+    def _add_topomap_outline(ax, edge_color, lw=3.0, radius=0.48):
         # Keep circle in axes coordinates to preserve circular geometry.
-        circ = Circle((0.5, 0.5), 0.48, transform=ax.transAxes, fill=False, edgecolor=edge_color, linewidth=lw, zorder=10)
+        circ = Circle((0.5, 0.5), radius, transform=ax.transAxes, fill=False, edgecolor=edge_color, linewidth=lw, zorder=10)
         circ.set_clip_on(False)
         ax.add_patch(circ)
+
+    def _draw_top_down_vline(ax, x, y_point, color="k", linewidth=1.0, alpha=0.7, zorder=3):
+        y0, y1 = ax.get_ylim()
+        if y1 <= y0:
+            return
+        yp = float(np.clip(float(y_point), y0, y1))
+        if yp >= y1:
+            return
+        ax.vlines(float(x), ymin=yp, ymax=y1, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
+
+    def _draw_zero_to_point_vline(ax, x, y_point, color="k", linewidth=1.0, alpha=0.7, zorder=3):
+        y0, y1 = ax.get_ylim()
+        if y1 <= y0:
+            return
+        base = float(np.clip(0.0, y0, y1))
+        yp = float(np.clip(float(y_point), y0, y1))
+        if yp == base:
+            return
+        lo, hi = (base, yp) if yp >= base else (yp, base)
+        ax.vlines(float(x), ymin=lo, ymax=hi, color=color, linewidth=linewidth, alpha=alpha, zorder=zorder)
 
     sfreq = float(raw_segment.info["sfreq"])
     n_samples = raw_segment.n_times
     times = np.arange(n_samples, dtype=float) / sfreq - flank_sec
     data_uv = raw_segment.get_data(picks="eeg") * 1e6
     gfp_uv = gfp * 1e6
-    ch_names = list(raw_segment.ch_names)
     n_ch = data_uv.shape[0]
 
-    fig = plt.figure(figsize=(5.83, 4))
-    gs = fig.add_gridspec(4, 1, height_ratios=[2.0, 1.2, 0.20, 1.4], hspace=0.0)
+    fig = plt.figure(figsize=(6.0, 5.8))
+    gs = fig.add_gridspec(5, 1, height_ratios=[2.0, 1.2, 0.20, 1.4, 1.71], hspace=0.05)
     ax_eeg = fig.add_subplot(gs[0, 0])
     ax_gfp = fig.add_subplot(gs[1, 0], sharex=ax_eeg)
     ax_strip = fig.add_subplot(gs[2, 0], sharex=ax_eeg)
     ax_mtmi = fig.add_subplot(gs[3, 0], sharex=ax_eeg)
+    ax_templates = fig.add_subplot(gs[4, 0])
 
     amp = np.percentile(np.abs(data_uv), 90)
     if amp <= 0:
@@ -432,10 +502,10 @@ def create_graphical_abstract(
     offsets = (np.arange(n_ch)[::-1] * spacing).astype(float)
     for i in range(n_ch):
         ax_eeg.plot(times, data_uv[i] + offsets[i], color="#6e73b0", linewidth=0.8)
-    ax_eeg.set_yticks(offsets)
-    ax_eeg.set_yticklabels(ch_names, fontsize=7)
+    ax_eeg.set_yticks([])
+    ax_eeg.set_yticklabels([])
     ax_eeg.set_xlim(0.0, window_sec)
-    ax_eeg.set_ylabel("EEG")
+    ax_eeg.set_ylabel("EEG [μV]")
     ax_eeg.set_xlabel("")
 
     palette = ["tab:blue", "tab:orange", "tab:olive", "tab:purple", "tab:green", "tab:red", "tab:brown"]
@@ -455,7 +525,7 @@ def create_graphical_abstract(
     if minima_idx.size > 0:
         ax_gfp.scatter(times[minima_idx], gfp_uv[minima_idx], s=12, color="k", zorder=3)
     ax_gfp.set_xlim(0.0, window_sec)
-    ax_gfp.set_ylabel(r"GFP $\mu$V")
+    ax_gfp.set_ylabel(r"GFP [$\mu$V]")
     ax_gfp.set_xlabel("")
     
     ax_strip.set_xlim(0.0, window_sec)
@@ -463,16 +533,57 @@ def create_graphical_abstract(
     ax_strip.set_yticks([])
     ax_strip.set_xlabel("")
 
+    # Build interval descriptors in plotting window so we can suppress edge-short labels.
+    min_edge_label_ms = 30.0
+    in_view = np.where((times >= 0.0) & (times <= window_sec))[0]
+    if in_view.size == 0:
+        raise RuntimeError("No samples in plotting window after time alignment.")
+    view_start = int(in_view[0])
+    view_stop = int(in_view[-1]) + 1
+    interval_entries = []
     for start, stop, label in runs:
         if label < 0 or label >= maps.shape[0]:
             continue
-        x0 = max(0.0, float(times[start]))
-        x1 = min(window_sec, float(times[stop - 1]) if stop > start else float(times[start]))
+        left = max(int(start), view_start)
+        right = min(int(stop), view_stop)
+        if right <= left:
+            continue
+        x0 = max(0.0, float(times[left]))
+        x1 = min(window_sec, float(times[right - 1]))
         if x1 <= x0:
             continue
-        ax_strip.axvspan(x0, x1, ymin=0.1, ymax=0.9, color=palette[label % len(palette)], alpha=0.85, linewidth=0.0, zorder=2)
-        letter = chr(ord("A") + int(label)) if 0 <= int(label) < 26 else str(int(label))
-        ax_strip.text((x0 + x1) * 0.5, 0.5, letter, ha="center", va="center", fontsize=8, color="k", zorder=3)
+        dur_ms = 1000.0 * float(right - left) / sfreq
+        interval_entries.append(
+            {
+                "left": left,
+                "right": right,
+                "label": int(label),
+                "x0": x0,
+                "x1": x1,
+                "dur_ms": dur_ms,
+            }
+        )
+    if interval_entries:
+        interval_entries[0]["suppress_letter"] = bool(interval_entries[0]["dur_ms"] < min_edge_label_ms)
+        interval_entries[-1]["suppress_letter"] = bool(interval_entries[-1]["dur_ms"] < min_edge_label_ms)
+        for i in range(1, len(interval_entries) - 1):
+            interval_entries[i]["suppress_letter"] = False
+
+    for ent in interval_entries:
+        lbl_i = int(ent["label"])
+        ax_strip.axvspan(
+            ent["x0"],
+            ent["x1"],
+            ymin=0.1,
+            ymax=0.9,
+            color=palette[lbl_i % len(palette)],
+            alpha=0.85,
+            linewidth=0.0,
+            zorder=2,
+        )
+        if not ent.get("suppress_letter", False):
+            letter = chr(ord("A") + lbl_i) if 0 <= lbl_i < 26 else str(lbl_i)
+            ax_strip.text((ent["x0"] + ent["x1"]) * 0.5, 0.5, letter, ha="center", va="center", fontsize=8, color="k", zorder=3)
 
     mtmi_t = times[minima_idx[1:]] if minima_idx.size >= 2 else np.array([])
     if mtmi_ms.size > 0 and mtmi_t.size > 0:
@@ -511,30 +622,39 @@ def create_graphical_abstract(
     ax_mtmi.margins(x=0.0)
     ax_mtmi.tick_params(axis="x", which="both", bottom=True, labelbottom=True)
     ax_mtmi.set_xticks(np.linspace(0.0, window_sec, 5))
+    ax_mtmi.set_yticks([])
 
-    in_view = np.where((times >= 0.0) & (times <= window_sec))[0]
-    if in_view.size == 0:
-        raise RuntimeError("No samples in plotting window after time alignment.")
-    view_start = int(in_view[0])
-    view_stop = int(in_view[-1]) + 1
+    # Reference bars (no y ticks): one per signal axis.
+    eeg_bar = 40.0
+    gfp_bar = _nice_scale_length(max(1e-12, 0.25 * np.max(np.abs(gfp_uv))))
+    if mtmi_ms.size > 0:
+        mtmi_span = max(1e-12, float(np.max(mtmi_ms) - np.min(mtmi_ms)))
+        mtmi_bar = _nice_scale_length(0.33 * mtmi_span)
+    else:
+        mtmi_bar = 100.0
+    _add_y_scale_bar(ax_eeg, eeg_bar, "μV", y_frac=0.62)
+    _add_y_scale_bar(ax_gfp, gfp_bar, "μV", y_frac=0.50)
+    _add_y_scale_bar(ax_mtmi, mtmi_bar, "ms", y_frac=0.62)
 
     interval_argmax = []
-    runs = contiguous_runs(sequence)
-    for start, stop, label in runs:
-        # valid microstate intervals only
-        if label < 0 or label >= maps.shape[0]:
+    for ent in interval_entries:
+        # Skip topomap plotting for first/last edge-short labels.
+        if ent.get("suppress_letter", False):
             continue
-        left = max(int(start), view_start)
-        right = min(int(stop), view_stop)
-        if right <= left:
-            continue
+        left = int(ent["left"])
+        right = int(ent["right"])
         local = np.argmax(gfp[left:right])
         idx = left + int(local)
-        interval_argmax.append((idx, int(label)))
+        interval_argmax.append((idx, int(ent["label"])))
 
     minima_t = times[minima_idx] if minima_idx.size > 0 else np.array([])
     minima_t = minima_t[(minima_t >= 0.0) & (minima_t <= window_sec)]
     minima_in_window = minima_idx[(times[minima_idx] >= 0.0) & (times[minima_idx] <= window_sec)] if minima_idx.size > 0 else np.array([], dtype=int)
+    mtmi_by_minima_sample = {}
+    if minima_idx.size >= 2 and mtmi_ms.size > 0:
+        upto = min(int(minima_idx.size - 1), int(mtmi_ms.size))
+        for i in range(1, upto + 1):
+            mtmi_by_minima_sample[int(minima_idx[i])] = float(mtmi_ms[i - 1])
 
     if minima_in_window.size > 0:
         min_vals = gfp_uv[minima_in_window]
@@ -602,13 +722,30 @@ def create_graphical_abstract(
         if map_top_y_center_base + box_h / 2.0 > 0.995:
             map_top_y_center_base = 0.995 - box_h / 2.0
         topo_t = np.array([times[idx] for idx, _ in interval_argmax], dtype=float)
-        # minima lines: full-height only on MTMI; on GFP only from 0 to minima value
+        # minima lines: draw from top down to the minima point (GFP/MTMI).
         for tmin in minima_t:
-            ax_mtmi.axvline(tmin, color="k", linewidth=1.0, alpha=0.7, zorder=3)
-            ax_strip.axvline(tmin, color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            ax_strip.axvline(
+                tmin,
+                ymin=-0.25,
+                ymax=1.25,
+                color="k",
+                linewidth=1.0,
+                alpha=0.7,
+                zorder=3,
+                clip_on=False,
+            )
             idx_min = int(np.argmin(np.abs(times - tmin)))
-            y_top = float(gfp_uv[idx_min])
-            ax_gfp.vlines(tmin, ymin=0.0, ymax=y_top, color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            _draw_zero_to_point_vline(ax_gfp, tmin, float(gfp_uv[idx_min]), color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            if idx_min in mtmi_by_minima_sample:
+                _draw_top_down_vline(
+                    ax_mtmi,
+                    tmin,
+                    mtmi_by_minima_sample[idx_min],
+                    color="k",
+                    linewidth=1.0,
+                    alpha=0.7,
+                    zorder=3,
+                )
         for idx, _ in interval_argmax:
             tt = times[idx]
             y_tt = float(gfp_uv[idx])
@@ -630,7 +767,10 @@ def create_graphical_abstract(
             u = np.clip(u, 0.0, 1.0)
             # hack: we displace them evenly so that we minimize overlap
             n = len(x_centers)
-            u = np.linspace(0.5/n, 1.0-0.5/n, n)
+            left_pad = 0.10
+            half_w_rel = (box_w / 2.0) / max((x1 - x0), 1e-12)
+            u_right = max(left_pad, 1.0 - half_w_rel)
+            u = np.linspace(left_pad, u_right, n)
             
             x_centers = x0 + u * (x1 - x0)
 
@@ -719,26 +859,114 @@ def create_graphical_abstract(
                     clip_on=False,
                 )
                 ax_gfp.add_artist(conn_mid_top)
-            _add_topomap_outline(ax_topo_map_top, edge_color=palette[lbl % len(palette)], lw=3.0)
+            _add_topomap_outline(ax_topo_map_top, edge_color=palette[lbl % len(palette)], lw=1.8)
     else:
         for tmin in minima_t:
-            ax_mtmi.axvline(tmin, color="k", linewidth=1.0, alpha=0.7, zorder=3)
-            ax_strip.axvline(tmin, color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            ax_strip.axvline(
+                tmin,
+                ymin=-0.18,
+                ymax=1.18,
+                color="k",
+                linewidth=1.0,
+                alpha=0.7,
+                zorder=3,
+                clip_on=False,
+            )
             idx_min = int(np.argmin(np.abs(times - tmin)))
-            y_top = float(gfp_uv[idx_min])
-            ax_gfp.vlines(tmin, ymin=0.0, ymax=y_top, color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            _draw_zero_to_point_vline(ax_gfp, tmin, float(gfp_uv[idx_min]), color="k", linewidth=1.0, alpha=0.7, zorder=3)
+            if idx_min in mtmi_by_minima_sample:
+                _draw_top_down_vline(
+                    ax_mtmi,
+                    tmin,
+                    mtmi_by_minima_sample[idx_min],
+                    color="k",
+                    linewidth=1.0,
+                    alpha=0.7,
+                    zorder=3,
+                )
+
+    # Bottom row: template topomaps A-D only (with channel markers).
+    ax_templates.set_xticks([])
+    ax_templates.set_yticks([])
+    ax_templates.set_xlabel("")
+    ax_templates.set_ylabel("")
+    for sp in ax_templates.spines.values():
+        sp.set_visible(False)
+
+    n_tpl = int(min(4, maps.shape[0]))
+    n_panels = max(n_tpl, 1)
+    pad = 0.015
+    panel_w = (1.0 - pad * (n_panels + 1)) / n_panels
+    y0 = 0.08
+    h = 0.84
+    vmax_tpl = 1.0
+    for k in range(n_tpl):
+        left = pad + k * (panel_w + pad)
+        axi = ax_templates.inset_axes([left, y0, panel_w, h])
+        tpl = _zscore_map(maps[k])
+        mne.viz.plot_topomap(
+            tpl,
+            pos2d,
+            axes=axi,
+            show=False,
+            sensors=True,
+            contours=0,
+            cmap="RdBu_r",
+            vlim=(-vmax_tpl, vmax_tpl),
+        )
+        axi.set_xticks([])
+        axi.set_yticks([])
+        axi.set_title(chr(ord("A") + k), fontsize=9, pad=1)
+        _add_topomap_outline(axi, edge_color=palette[k % len(palette)], lw=1.8, radius=0.495)
+
+    # Time reference bar (100 ms) on MTMI axis, bottom-right corner.
+    x0_mtmi, x1_mtmi = ax_mtmi.get_xlim()
+    y0_mtmi, y1_mtmi = ax_mtmi.get_ylim()
+    mtmi_x_span = max(1e-12, float(x1_mtmi - x0_mtmi))
+    mtmi_y_span = max(1e-12, float(y1_mtmi - y0_mtmi))
+    bar_len_sec = 0.10
+    bar_x1 = float(x1_mtmi) - 0.03 * mtmi_x_span
+    bar_x0 = max(float(x0_mtmi), bar_x1 - bar_len_sec)
+    bar_y = float(y0_mtmi) + 0.08 * mtmi_y_span
+    ax_mtmi.plot(
+        [bar_x0, bar_x1],
+        [bar_y, bar_y],
+        color="k",
+        linewidth=2.0,
+        solid_capstyle="butt",
+        zorder=30,
+        clip_on=False,
+    )
+    ax_mtmi.text(
+        0.5 * (bar_x0 + bar_x1),
+        bar_y + 0.04 * mtmi_y_span,
+        "100 ms",
+        ha="center",
+        va="bottom",
+        fontsize=8,
+        color="k",
+        zorder=31,
+    )
 
     if cleanup:
-        for ax in [ax_eeg, ax_gfp, ax_strip, ax_mtmi]:
+        for ax in [ax_eeg, ax_gfp, ax_mtmi]:
             ax.set_xlabel("")
-            ax.set_ylabel("")
             ax.set_xticks([])
             ax.set_yticks([])
             ax.set_xticklabels([])
             ax.set_yticklabels([])
             ax.tick_params(axis="both", which="both", length=0)
-            ax.spines["left"].set_visible(False)
+            ax.spines["left"].set_visible(True)
+        # Keep status strip minimalist.
+        ax_strip.set_xlabel("")
+        ax_strip.set_xticks([])
+        ax_strip.set_yticks([])
+        ax_strip.set_xticklabels([])
+        ax_strip.set_yticklabels([])
+        ax_strip.tick_params(axis="both", which="both", length=0)
+        ax_strip.spines["left"].set_visible(False)
         ax_mtmi.spines["bottom"].set_visible(False)
+        ax_templates.set_axis_off()
 
     fig.subplots_adjust(hspace=0.0)
     fig.savefig(output_prefix + ".png", dpi=260, bbox_inches="tight")
@@ -763,48 +991,141 @@ def main():
 
     input_dir = runtime["input_dir"]
     records = discover_input_records(input_dir, subject_id=args.subject_id)
-    selected_record, selected_edf_path, duration_sec = choose_record_and_segment(records, rng, required_sec)
-    selected_path = selected_edf_path
-
-    raw = mne.io.read_raw_edf(selected_edf_path, preload=True, verbose="ERROR").pick("eeg")
-    raw = detach_raw_from_source(raw)
-    if raw.n_times < 10:
-        raise RuntimeError("Selected raw has too few samples.")
-
-    sfreq = float(raw.info["sfreq"])
-    if duration_sec < required_sec:
-        raise RuntimeError(
-            f"Recording too short ({duration_sec:.2f}s) for required window+flanks ({required_sec:.2f}s)."
-        )
-    target_start_min = flank_sec
-    target_start_max = min(runtime["start_max_sec"], duration_sec - flank_sec - window_sec)
-    if target_start_max <= target_start_min:
-        raise RuntimeError("No valid start time for requested window/flanks within recording.")
-
-    start_sec = float(rng.uniform(target_start_min, target_start_max))
-    seg_start = start_sec - flank_sec
-    seg_stop = start_sec + window_sec + flank_sec
-    raw_segment = raw.copy().crop(tmin=seg_start, tmax=seg_stop, include_tmax=False).load_data()
-
     maps, _, _, meta_chan_labels = load_metamaps(runtime["metamaps_json"], runtime["n_ms"])
-    ridx, midx, pos2d, _ = channel_alignment(raw_segment, meta_chan_labels)
-
-    raw_aligned = raw_segment.get_data(picks="eeg")[ridx, :]
-    maps_aligned = maps[:, midx]
     ms_maps, ms_gev, ms_lbl = ms_utils.LoadMetamaps(filename=runtime["metamaps_json"], plot=False, n_ms=runtime["n_ms"])
     ms_model = ms_utils.PycroModKMeans(ms_maps, ms_gev, ms_lbl, plot=False)
     ms_cfg = _build_ms_cfg(cfg)
-    ms_result = ms_utils.microstates_extraction(raw_segment.copy(), ms_model, ms_cfg)
-    sequence = np.asarray(ms_result["sequence"], dtype=int)
+    min_gfp_minima = int(runtime["min_gfp_minima"])
+    max_gfp_minima = int(runtime["max_gfp_minima"])
+    max_microstate_intervals = int(runtime["max_microstate_intervals"])
+    min_mtmi_ms = float(runtime["min_mtmi_ms"])
+    min_label_ms = float(runtime["min_label_ms"])
+    if min_gfp_minima < 0:
+        raise ValueError("min_gfp_minima must be >= 0.")
+    if max_gfp_minima <= min_gfp_minima:
+        raise ValueError("max_gfp_minima must be > min_gfp_minima.")
+    if max_microstate_intervals <= 0:
+        raise ValueError("max_microstate_intervals must be > 0.")
+    if min_mtmi_ms < 0:
+        raise ValueError("min_mtmi_ms must be >= 0.")
+    if min_label_ms < 0:
+        raise ValueError("min_label_ms must be >= 0.")
 
-    gfp, gfp_flt, minima_idx, mtmi_ms = compute_gfp_and_mtmi(raw_segment.copy().pick(raw_segment.ch_names))
+    # Constrained random selection:
+    # - keep only windows with min<=GFP minima<max and intervals<max in [0, window_sec]
+    # - try up to 10 random windows per EDF, then move to next EDF/record
+    record_order = rng.permutation(len(records))
+    selected_record = None
+    selected_path = None
+    start_sec = None
+    raw_segment = None
+    sequence = None
+    gfp = gfp_flt = minima_idx = mtmi_ms = None
+
+    print(f"[GAB] Candidate records: {len(records)}")
+    print(
+        "[GAB] Selection constraints: "
+        f"{min_gfp_minima}<=minima<{max_gfp_minima} and intervals<{max_microstate_intervals} "
+        f"and MTMI>={min_mtmi_ms:g} ms and label_ms>={min_label_ms:g} "
+        "(window only), max 10 attempts per EDF"
+    )
+    for rec_rank, rec_idx in enumerate(record_order, start=1):
+        rec = records[int(rec_idx)]
+        rec_stem = rec["record_stem"]
+        print(f"[GAB] Record {rec_rank}/{len(records)}: {rec_stem}")
+        edf_order = rng.permutation(len(rec["edf_paths"]))
+        found = False
+        for edf_idx in edf_order:
+            edf_path = rec["edf_paths"][int(edf_idx)]
+            duration_sec = _safe_edf_duration_sec(edf_path)
+            if duration_sec is None or duration_sec < required_sec:
+                print(f"[GAB]  skip EDF (too short/unreadable): {os.path.basename(edf_path)}")
+                continue
+            raw = mne.io.read_raw_edf(edf_path, preload=True, verbose="ERROR").pick("eeg")
+            raw = detach_raw_from_source(raw)
+            if raw.n_times < 10:
+                print(f"[GAB]  skip EDF (too few samples): {os.path.basename(edf_path)}")
+                continue
+
+            target_start_min = flank_sec
+            target_start_max = min(runtime["start_max_sec"], duration_sec - flank_sec - window_sec)
+            if target_start_max <= target_start_min:
+                print(f"[GAB]  skip EDF (invalid start range): {os.path.basename(edf_path)}")
+                continue
+
+            for k in range(1, 11):
+                cand_start = float(rng.uniform(target_start_min, target_start_max))
+                seg_start = cand_start - flank_sec
+                seg_stop = cand_start + window_sec + flank_sec
+                cand_seg = raw.copy().crop(tmin=seg_start, tmax=seg_stop, include_tmax=False).load_data()
+                ms_result = ms_utils.microstates_extraction(cand_seg.copy(), ms_model, ms_cfg)
+                cand_seq = np.asarray(ms_result["sequence"], dtype=int)
+                cand_gfp, cand_gfp_flt, cand_minima_idx, cand_mtmi_ms = compute_gfp_and_mtmi(cand_seg.copy().pick(cand_seg.ch_names))
+
+                sfreq = float(cand_seg.info["sfreq"])
+                times = np.arange(cand_seg.n_times, dtype=float) / sfreq - flank_sec
+                win_mask = (times >= 0.0) & (times <= window_sec)
+                win_idx = np.where(win_mask)[0]
+                if win_idx.size == 0:
+                    continue
+                w0, w1 = int(win_idx[0]), int(win_idx[-1]) + 1
+                minima_in_window = cand_minima_idx[(times[cand_minima_idx] >= 0.0) & (times[cand_minima_idx] <= window_sec)]
+                mtmi_t = times[cand_minima_idx[1:]] if cand_minima_idx.size >= 2 else np.array([], dtype=float)
+                mtmi_in_window = cand_mtmi_ms[(mtmi_t >= 0.0) & (mtmi_t <= window_sec)] if mtmi_t.size else np.array([], dtype=float)
+                runs = contiguous_runs(cand_seq)
+                intervals_in_window = 0
+                label_durations_ms = []
+                for rs, re, lbl in runs:
+                    if lbl < 0 or lbl >= maps.shape[0]:
+                        continue
+                    left = max(int(rs), w0)
+                    right = min(int(re), w1)
+                    if right > left:
+                        intervals_in_window += 1
+                        label_durations_ms.append(1000.0 * float(right - left) / sfreq)
+
+                min_label_seen_ms = float(np.min(label_durations_ms)) if label_durations_ms else float("nan")
+                print(
+                    f"[GAB]   attempt {k}/10: minima={len(minima_in_window)}, "
+                    f"intervals={intervals_in_window}, "
+                    f"min_mtmi={float(np.min(mtmi_in_window)) if mtmi_in_window.size else float('nan'):.1f} ms, "
+                    f"min_label={min_label_seen_ms:.1f} ms"
+                )
+                n_minima = int(len(minima_in_window))
+                mtmi_ok = bool(mtmi_in_window.size > 0 and np.all(mtmi_in_window >= min_mtmi_ms))
+                labels_ok = bool(label_durations_ms and np.all(np.asarray(label_durations_ms, dtype=float) >= min_label_ms))
+                if (
+                    n_minima >= min_gfp_minima
+                    and n_minima < max_gfp_minima
+                    and intervals_in_window < max_microstate_intervals
+                    and mtmi_ok
+                    and labels_ok
+                ):
+                    selected_record = rec
+                    selected_path = edf_path
+                    start_sec = cand_start
+                    raw_segment = cand_seg
+                    sequence = cand_seq
+                    gfp, gfp_flt, minima_idx, mtmi_ms = cand_gfp, cand_gfp_flt, cand_minima_idx, cand_mtmi_ms
+                    print("[GAB]   accepted")
+                    found = True
+                    break
+            if found:
+                break
+            print(f"[GAB]  EDF exhausted without valid window: {os.path.basename(edf_path)}")
+        if found:
+            break
+
+    if raw_segment is None:
+        raise RuntimeError("No valid random segment found with requested constraints.")
+
+    ridx, midx, pos2d, _ = channel_alignment(raw_segment, meta_chan_labels)
+    raw_aligned = raw_segment.get_data(picks="eeg")[ridx, :]
+    maps_aligned = maps[:, midx]
 
     os.makedirs(runtime["output_dir"], exist_ok=True)
     base_name = selected_record["record_stem"]
     out_prefix_main = os.path.join(runtime["output_dir"], f"gabstract_{base_name}_seed{runtime['seed']}")
-    out_prefix_maps = os.path.join(runtime["output_dir"], f"metamaps_n{runtime['n_ms']}")
-
-    plot_metamaps_figure(maps_aligned, pos2d, out_prefix_maps, show=runtime["show"])
     create_graphical_abstract(
         raw_segment=raw_segment,
         topo_data_aligned=raw_aligned,
@@ -835,7 +1156,6 @@ def main():
     print("Flank [s]:", flank_sec)
     print("Window [s]:", window_sec)
     print("Output main:", out_prefix_main + ".png/.svg")
-    print("Output maps:", out_prefix_maps + ".png/.svg")
 
 
 if __name__ == "__main__":
